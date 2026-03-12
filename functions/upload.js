@@ -24,8 +24,6 @@ const ALLOWED_EXTENSIONS = new Set([
     'avif',
 ]);
 
-const MAX_FILE_SIZE = 10 * 1024 * 1024;
-
 function jsonError(message, status = 400) {
     return new Response(JSON.stringify({ error: message }), {
         status,
@@ -35,16 +33,6 @@ function jsonError(message, status = 400) {
 
 function isAllowedImage(uploadFile, fileExtension) {
     return ALLOWED_IMAGE_TYPES.has(uploadFile.type) && ALLOWED_EXTENSIONS.has(fileExtension);
-}
-
-function isAuthorized(request, formData, env) {
-    if (!env.UPLOAD_KEY) return true;
-
-    const authHeader = request.headers.get('x-upload-key');
-    const authFromQuery = new URL(request.url).searchParams.get('key');
-    const authFromForm = formData.get('key');
-
-    return authHeader === env.UPLOAD_KEY || authFromQuery === env.UPLOAD_KEY || authFromForm === env.UPLOAD_KEY;
 }
 
 export async function onRequestPost(context) {
@@ -57,10 +45,6 @@ export async function onRequestPost(context) {
         await errorHandling(context);
         telemetryData(context);
 
-        if (!isAuthorized(request, formData, env)) {
-            return jsonError('Unauthorized upload request', 401);
-        }
-
         const uploadFile = formData.get('file');
         if (!uploadFile) {
             return jsonError('No file uploaded');
@@ -71,10 +55,6 @@ export async function onRequestPost(context) {
 
         if (!isAllowedImage(uploadFile, fileExtension)) {
             return jsonError('Only image uploads are allowed');
-        }
-
-        if (uploadFile.size > MAX_FILE_SIZE) {
-            return jsonError('Image too large, max size is 10MB');
         }
 
         const telegramFormData = new FormData();
