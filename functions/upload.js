@@ -1,5 +1,52 @@
 import { errorHandling, telemetryData } from "./utils/middleware";
 
+const ALLOWED_IMAGE_TYPES = new Set([
+    'image/jpeg',
+    'image/png',
+    'image/webp',
+    'image/gif',
+    'image/bmp',
+    'image/svg+xml',
+    'image/x-icon',
+    'image/vnd.microsoft.icon',
+    'image/avif',
+]);
+
+const ALLOWED_EXTENSIONS = new Set([
+    'jpg',
+    'jpeg',
+    'png',
+    'webp',
+    'gif',
+    'bmp',
+    'svg',
+    'ico',
+    'avif',
+]);
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+
+function jsonError(message, status = 400) {
+    return new Response(JSON.stringify({ error: message }), {
+        status,
+        headers: { 'Content-Type': 'application/json' }
+    });
+}
+
+function isAllowedImage(uploadFile, fileExtension) {
+    return ALLOWED_IMAGE_TYPES.has(uploadFile.type) && ALLOWED_EXTENSIONS.has(fileExtension);
+}
+
+function isAuthorized(request, formData, env) {
+    if (!env.UPLOAD_KEY) return true;
+
+    const authHeader = request.headers.get('x-upload-key');
+    const authFromQuery = new URL(request.url).searchParams.get('key');
+    const authFromForm = formData.get('key');
+
+    return authHeader === env.UPLOAD_KEY || authFromQuery === env.UPLOAD_KEY || authFromForm === env.UPLOAD_KEY;
+}
+
 export async function onRequestPost(context) {
     const { request, env } = context;
 
@@ -10,34 +57,31 @@ export async function onRequestPost(context) {
         await errorHandling(context);
         telemetryData(context);
 
+        if (!isAuthorized(request, formData, env)) {
+            return jsonError('Unauthorized upload request', 401);
+        }
+
         const uploadFile = formData.get('file');
         if (!uploadFile) {
-            throw new Error('No file uploaded');
+            return jsonError('No file uploaded');
         }
 
         const fileName = uploadFile.name;
         const fileExtension = fileName.split('.').pop().toLowerCase();
 
-        const telegramFormData = new FormData();
-        telegramFormData.append("chat_id", env.TG_Chat_ID);
-
-        // 根据文件类型选择合适的上传方式
-        let apiEndpoint;
-        if (uploadFile.type.startsWith('image/')) {
-            telegramFormData.append("photo", uploadFile);
-            apiEndpoint = 'sendPhoto';
-        } else if (uploadFile.type.startsWith('audio/')) {
-            telegramFormData.append("audio", uploadFile);
-            apiEndpoint = 'sendAudio';
-        } else if (uploadFile.type.startsWith('video/')) {
-            telegramFormData.append("video", uploadFile);
-            apiEndpoint = 'sendVideo';
-        } else {
-            telegramFormData.append("document", uploadFile);
-            apiEndpoint = 'sendDocument';
+        if (!isAllowedImage(uploadFile, fileExtension)) {
+            return jsonError('Only image uploads are allowed');
         }
 
-        const result = await sendToTelegram(telegramFormData, apiEndpoint, env);
+        if (uploadFile.size > MAX_FILE_SIZE) {
+            return jsonError('Image too large, max size is 10MB');
+        }
+
+        const telegramFormData = new FormData();
+        telegramFormData.append("chat_id", env.TG_Chat_ID);
+        telegramFormData.append("photo", uploadFile);
+
+        const result = await sendToTelegram(telegramFormData, env);
 
         if (!result.success) {
             throw new Error(result.error);
@@ -98,9 +142,9 @@ function getFileId(response) {
     return null;
 }
 
-async function sendToTelegram(formData, apiEndpoint, env, retryCount = 0) {
+async function sendToTelegram(formData, env, retryCount = 0) {
     const MAX_RETRIES = 2;
-    const apiUrl = `https://api.telegram.org/bot${env.TG_Bot_Token}/${apiEndpoint}`;
+    const apiUrl = `https://api.telegram.org/bot${env.TG_Bot_Token}/sendPhoto`;
 
     try {
         const response = await fetch(apiUrl, { method: "POST", body: formData });
@@ -108,15 +152,6 @@ async function sendToTelegram(formData, apiEndpoint, env, retryCount = 0) {
 
         if (response.ok) {
             return { success: true, data: responseData };
-        }
-
-        // 图片上传失败时转为文档方式重试
-        if (retryCount < MAX_RETRIES && apiEndpoint === 'sendPhoto') {
-            console.log('Retrying image as document...');
-            const newFormData = new FormData();
-            newFormData.append('chat_id', formData.get('chat_id'));
-            newFormData.append('document', formData.get('photo'));
-            return await sendToTelegram(newFormData, 'sendDocument', env, retryCount + 1);
         }
 
         return {
@@ -127,7 +162,7 @@ async function sendToTelegram(formData, apiEndpoint, env, retryCount = 0) {
         console.error('Network error:', error);
         if (retryCount < MAX_RETRIES) {
             await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
-            return await sendToTelegram(formData, apiEndpoint, env, retryCount + 1);
+            return await sendToTelegram(formData, env, retryCount + 1);
         }
         return { success: false, error: 'Network error occurred' };
     }
